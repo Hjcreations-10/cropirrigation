@@ -1,0 +1,6 @@
+{
+  "name": "KrishiMitra AI",
+  "description": "An interactive agricultural platform featuring AI-powered crop recommendations, leaf disease detection, dynamic weather advisories, voice assistance, SMS simulations, and a dedicated expert portal.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
