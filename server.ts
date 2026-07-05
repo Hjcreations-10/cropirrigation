@@ -27,10 +27,24 @@ if (apiKey && apiKey !== "MY_GEMINI_API_KEY") {
 }
 
 // Database setup (Mock Firestore via local JSON)
+// On Vercel serverless, only /tmp is writable. We use an in-memory fallback
+// so the module never crashes on cold-start even if /tmp is unavailable.
 const LOCAL_DB_FILE = path.join(process.cwd(), "db.json");
-const DB_FILE = (process.env.VERCEL || process.env.NODE_ENV === "production" || fs.existsSync("/tmp"))
-  ? path.join("/tmp", "db.json")
-  : LOCAL_DB_FILE;
+
+function getDbFile(): string {
+  try {
+    // Check if /tmp is available (Vercel / Linux serverless)
+    if (process.env.VERCEL || process.env.NODE_ENV === "production") {
+      return path.join("/tmp", "db.json");
+    }
+    if (fs.existsSync("/tmp")) {
+      return path.join("/tmp", "db.json");
+    }
+  } catch (_) {
+    // ignore
+  }
+  return LOCAL_DB_FILE;
+}
 
 interface DatabaseSchema {
   users: User[];
@@ -39,6 +53,9 @@ interface DatabaseSchema {
   voiceLogs: VoiceLog[];
   smsLogs: SmsLog[];
 }
+
+// In-memory DB — acts as a cache and fallback when filesystem is unavailable
+let inMemoryDb: DatabaseSchema | null = null;
 
 const defaultDb: DatabaseSchema = {
   users: [
@@ -134,12 +151,19 @@ const defaultDb: DatabaseSchema = {
 };
 
 function readDb(): DatabaseSchema {
+  // Return in-memory DB if available (within same serverless invocation)
+  if (inMemoryDb) {
+    return inMemoryDb;
+  }
   try {
+    const DB_FILE = getDbFile();
     if (fs.existsSync(DB_FILE)) {
       const data = fs.readFileSync(DB_FILE, "utf-8");
-      return JSON.parse(data);
+      const parsed = JSON.parse(data) as DatabaseSchema;
+      inMemoryDb = parsed;
+      return parsed;
     } else if (DB_FILE !== LOCAL_DB_FILE && fs.existsSync(LOCAL_DB_FILE)) {
-      // Seed /tmp/db.json from project db.json if running in read-only environment
+      // Seed /tmp/db.json from project db.json if running in production
       const data = fs.readFileSync(LOCAL_DB_FILE, "utf-8");
       try {
         fs.writeFileSync(DB_FILE, data, "utf-8");
@@ -147,25 +171,40 @@ function readDb(): DatabaseSchema {
       } catch (writeErr) {
         console.warn("⚠️ Could not write seed to /tmp/db.json:", writeErr);
       }
-      return JSON.parse(data);
+      const parsed = JSON.parse(data) as DatabaseSchema;
+      inMemoryDb = parsed;
+      return parsed;
     }
   } catch (err) {
-    console.error("Error reading database file, using fallback database:", err);
+    console.error("Error reading database file, using in-memory fallback:", err);
   }
-  return defaultDb;
+  // Always fall back to defaultDb — clone it so mutations are tracked in-memory
+  const cloned = JSON.parse(JSON.stringify(defaultDb)) as DatabaseSchema;
+  inMemoryDb = cloned;
+  return cloned;
 }
 
 function writeDb(db: DatabaseSchema) {
+  // Always keep in-memory state up to date
+  inMemoryDb = db;
   try {
+    const DB_FILE = getDbFile();
     fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
   } catch (err) {
-    console.error("Error writing to database file:", err);
+    // On Vercel serverless /tmp writes may fail — in-memory fallback is sufficient
+    console.warn("⚠️ Could not persist DB to filesystem (running in-memory mode):", (err as Error).message);
   }
 }
 
-// Initial seeding if empty
-if (!fs.existsSync(DB_FILE)) {
-  writeDb(defaultDb);
+// Initial seeding — wrapped in try-catch so a cold-start never crashes the module
+try {
+  const DB_FILE = getDbFile();
+  if (!fs.existsSync(DB_FILE)) {
+    writeDb(defaultDb);
+  }
+} catch (err) {
+  console.warn("⚠️ Could not check/seed DB file on startup, using in-memory defaults:", (err as Error).message);
+  inMemoryDb = JSON.parse(JSON.stringify(defaultDb)) as DatabaseSchema;
 }
 
 // Initialize Express app and PORT at top-level
